@@ -1,4 +1,8 @@
+import os
+
 from fastmcp import FastMCP
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 
@@ -17,7 +21,7 @@ from tools import (
 # Server metadata
 # ─────────────────────────────────────────────────────────────────────
 
-INSTRUCTION_STRING = """Slovak Legal Sources MCP Server
+INSTRUCTION_STRING = """Slovak Law Search
 
 This server provides natural-language access to three official Slovak legal data sources:
 
@@ -38,11 +42,11 @@ VERSION = "1.0.0"
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Server configuration — NO authentication
+# Server — NO authentication, open CORS, no blockers
 # ─────────────────────────────────────────────────────────────────────
 
 mcp = FastMCP(
-    name="Slovak Legal Sources",
+    name="Slovak Law Search",
     instructions=INSTRUCTION_STRING,
     version=VERSION,
 )
@@ -77,13 +81,28 @@ async def health_check(request: Request) -> PlainTextResponse:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# ASGI app
+# CORS — allow everything, no origin/header/method restrictions
 # ─────────────────────────────────────────────────────────────────────
 
-app = mcp.http_app()
+cors_middleware = [
+    Middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+        allow_credentials=False,
+        expose_headers=["*"],
+    )
+]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# ASGI app — wide open, no auth, no IP filtering
+# ─────────────────────────────────────────────────────────────────────
+
+app = mcp.http_app(middleware=cors_middleware)
 
 if __name__ == "__main__":
-    import os
     import uvicorn
 
     port = int(os.environ.get("PORT", 8000))
