@@ -277,10 +277,13 @@ async def search_slovak_legislation(
 
     url = f"{SLOVLEX_BASE}/static/SK/ZZ/{year}/"
 
-    async with httpx.AsyncClient(timeout=SLOVLEX_TIMEOUT, follow_redirects=True) as client:
-        resp = await client.get(url)
-        resp.raise_for_status()
-        html = resp.text
+    try:
+        async with httpx.AsyncClient(timeout=SLOVLEX_TIMEOUT, follow_redirects=True) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            html = resp.text
+    except httpx.HTTPStatusError:
+        return [{"message": f"No legislation found for year {year}. Year may not exist in the database."}]
 
     soup = BeautifulSoup(html, "html.parser")
     links = soup.find_all("a", href=True)
@@ -339,18 +342,22 @@ async def get_slovak_law(year: int, number: int) -> dict:
     """
     version_url = f"{SLOVLEX_BASE}/static/SK/ZZ/{year}/{number}/"
 
-    async with httpx.AsyncClient(timeout=SLOVLEX_TIMEOUT, follow_redirects=True) as client:
-        resp = await client.get(version_url)
-        resp.raise_for_status()
-        html = resp.text
+    try:
+        async with httpx.AsyncClient(timeout=SLOVLEX_TIMEOUT, follow_redirects=True) as client:
+            resp = await client.get(version_url)
+            resp.raise_for_status()
+            html = resp.text
+    except httpx.HTTPStatusError:
+        return {"error": f"Law {number}/{year} not found. Check the year and number."}
 
     soup = BeautifulSoup(html, "html.parser")
     links = soup.find_all("a", href=True)
 
+    # Only pick .html files that are direct children (not cross-references like ../../../ZZ/...)
     html_links = []
     for link in links:
         href = link.get("href", "")
-        if href.endswith(".html"):
+        if href.endswith(".html") and "/" not in href:
             html_links.append(href)
 
     if not html_links:
@@ -359,10 +366,13 @@ async def get_slovak_law(year: int, number: int) -> dict:
     latest = sorted(html_links)[-1]
     text_url = f"{SLOVLEX_BASE}/static/SK/ZZ/{year}/{number}/{latest}"
 
-    async with httpx.AsyncClient(timeout=SLOVLEX_TIMEOUT, follow_redirects=True) as client:
-        resp = await client.get(text_url)
-        resp.raise_for_status()
-        text_html = resp.text
+    try:
+        async with httpx.AsyncClient(timeout=SLOVLEX_TIMEOUT, follow_redirects=True) as client:
+            resp = await client.get(text_url)
+            resp.raise_for_status()
+            text_html = resp.text
+    except httpx.HTTPStatusError:
+        return {"error": f"Could not fetch text for law {number}/{year}."}
 
     text_soup = BeautifulSoup(text_html, "html.parser")
 
@@ -402,16 +412,18 @@ async def list_legislation_years() -> list[dict]:
         html = resp.text
 
     soup = BeautifulSoup(html, "html.parser")
-    links = soup.find_all("a", href=True)
 
+    # Years are in <li class="singleYear"> elements with hrefs like /static/SK/ZZ/1918/
     years = []
-    for link in links:
-        href = link.get("href", "").strip("/")
-        if href.isdigit() and len(href) == 4:
-            years.append({
-                "year": int(href),
-                "url": f"{SLOVLEX_BASE}/static/SK/ZZ/{href}/",
-            })
+    for li in soup.find_all("li", class_="singleYear"):
+        year_link = li.find("a", href=True)
+        if year_link:
+            text = year_link.get_text(strip=True)
+            if text.isdigit() and len(text) == 4:
+                years.append({
+                    "year": int(text),
+                    "url": f"{SLOVLEX_BASE}/static/SK/ZZ/{text}/",
+                })
 
     return sorted(years, key=lambda x: x["year"], reverse=True)
 
@@ -445,23 +457,32 @@ async def search_data_protection_guidelines(
     Returns:
         A list of matching guidelines with title, category, date, and URL.
     """
-    guidelines_urls = [
-        f"{UOOU_BASE}/en/legislation/guidelines-faq/office-guidelines/",
-        f"{UOOU_BASE}/en/legislation/guidelines-faq/edpb-guidelines/",
+    # Each source page and the path prefix for its actual guideline links
+    source_pages = [
+        {
+            "url": f"{UOOU_BASE}/en/legislation/guidelines-faq/office-guidelines/",
+            "prefix": "/en/legislation/guidelines-faq/office-guidelines/",
+            "cat": "office_guideline",
+        },
+        {
+            "url": f"{UOOU_BASE}/en/legislation/guidelines-faq/edpb-guidelines/",
+            "prefix": "/en/legislation/guidelines-faq/edpb-guidelines/",
+            "cat": "edpb",
+        },
     ]
 
     if category == "office_guideline":
-        guidelines_urls = [guidelines_urls[0]]
+        source_pages = [source_pages[0]]
     elif category == "edpb":
-        guidelines_urls = [guidelines_urls[1]]
+        source_pages = [source_pages[1]]
 
     results = []
     query_lower = query.lower() if query else ""
 
     async with httpx.AsyncClient(timeout=UOOU_TIMEOUT, follow_redirects=True) as client:
-        for page_url in guidelines_urls:
+        for source in source_pages:
             try:
-                resp = await client.get(page_url)
+                resp = await client.get(source["url"])
                 resp.raise_for_status()
                 html = resp.text
             except Exception:
@@ -473,25 +494,26 @@ async def search_data_protection_guidelines(
                 href = link.get("href", "")
                 text = link.get_text(strip=True)
 
-                if not text or len(text) < 10:
+                if not text or len(text) < 15:
                     continue
 
-                if "/guidelines-faq/" not in href and "/legislation/" not in href:
+                # Only accept links that are actual sub-pages of this guideline section
+                # e.g. /en/legislation/guidelines-faq/office-guidelines/some-guideline/
+                if not href.startswith(source["prefix"]):
                     continue
 
-                if href == page_url or href.endswith("/guidelines-faq/"):
+                # Skip the section index page itself
+                if href.rstrip("/") == source["prefix"].rstrip("/"):
                     continue
 
                 if query_lower and query_lower not in text.lower():
                     continue
 
-                full_url = href if href.startswith("http") else f"{UOOU_BASE}{href}"
-
-                cat = "office_guideline" if "office-guidelines" in full_url else "edpb"
+                full_url = f"{UOOU_BASE}{href}"
 
                 results.append({
                     "title": text,
-                    "category": cat,
+                    "category": source["cat"],
                     "url": full_url,
                 })
 
@@ -584,7 +606,9 @@ async def get_data_protection_document(url: str) -> dict:
 
     pdf_links = []
     for link in soup.find_all("a", href=True):
-        href = link.get("href", "")
+        href = link.get("href", "").strip()
+        # Clean whitespace/newlines from href
+        href = "".join(href.split())
         if href.endswith(".pdf"):
             full_href = href if href.startswith("http") else f"{UOOU_BASE}{href}"
             pdf_links.append(full_href)
@@ -594,4 +618,5 @@ async def get_data_protection_document(url: str) -> dict:
         "text": full_text,
         "url": url,
         "pdf_attachments": pdf_links,
+        "note": "Most UOOU guidelines are published as PDF attachments. Check pdf_attachments for download links." if pdf_links else "",
     }
