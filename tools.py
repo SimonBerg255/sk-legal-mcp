@@ -21,13 +21,17 @@ KOLEGIUM_MAP = {
 
 
 async def _fetch_decision(client: httpx.AsyncClient, decision_id: str) -> dict:
-    """Fetch a single decision by ID."""
+    """Fetch a single decision by ID. Injects the original ID since the API returns ID=''."""
     params = {"getDecision": "", "id": decision_id}
     resp = await client.get(
         SUPREME_COURT_API, params=params, headers=SUPREME_COURT_HEADERS
     )
     resp.raise_for_status()
-    return resp.json()
+    data = resp.json()
+    if isinstance(data, dict):
+        # The API returns "ID": "" — inject the known working ID
+        data["_decision_id"] = decision_id
+    return data
 
 
 async def search_supreme_court(
@@ -99,11 +103,13 @@ async def search_supreme_court(
         if not item:
             continue
 
+        # Use _decision_id (injected by _fetch_decision) since API returns ID=""
+        decision_id = item.get("_decision_id", "") or item.get("ID", "")
         text = item.get("obsah", "")
         excerpt = text[:500] + "..." if len(text) > 500 else text
 
         results.append({
-            "id": item.get("ID", ""),
+            "id": decision_id,
             "title": item.get("cislo", ""),
             "date": item.get("datum", ""),
             "ecli": item.get("ecli", ""),
@@ -113,7 +119,7 @@ async def search_supreme_court(
             "senate": item.get("senat", ""),
             "judge": item.get("sudca", ""),
             "subject": item.get("merito", ""),
-            "url": f"https://www.nsud.sk/rozhodnutia/{item.get('ID', '')}/",
+            "url": f"https://www.nsud.sk/rozhodnutia/{decision_id}/",
             "text_excerpt": excerpt,
         })
 
@@ -152,8 +158,12 @@ async def get_supreme_court_decision(decision_id: str) -> dict:
 
     item = data
 
+    full_text = item.get("obsah", "")
+    if not full_text:
+        return {"error": f"Decision with ID {decision_id} not found."}
+
     return {
-        "id": item.get("ID", decision_id),
+        "id": decision_id,
         "title": item.get("cislo", ""),
         "date": item.get("datum", ""),
         "ecli": item.get("ecli", ""),
@@ -164,7 +174,7 @@ async def get_supreme_court_decision(decision_id: str) -> dict:
         "judge": item.get("sudca", ""),
         "subject": item.get("merito", ""),
         "url": f"https://www.nsud.sk/rozhodnutia/{decision_id}/",
-        "full_text": item.get("obsah", ""),
+        "full_text": full_text,
     }
 
 
@@ -209,8 +219,9 @@ async def get_recent_supreme_court_decisions(since_date: str) -> list[dict]:
             continue
         if not item:
             continue
+        decision_id = item.get("_decision_id", "") or item.get("ID", "")
         results.append({
-            "id": item.get("ID", ""),
+            "id": decision_id,
             "title": item.get("cislo", ""),
             "date": item.get("datum", ""),
             "ecli": item.get("ecli", ""),
